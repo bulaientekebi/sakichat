@@ -1,0 +1,8 @@
+# 编译产物
+server/sakichat_server
+server/*.o
+server/*.log
+
+# 系统文件
+Thumbs.db
+.DS_Store
