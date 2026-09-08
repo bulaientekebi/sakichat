@@ -172,7 +172,9 @@ const inputText = document.getElementById("input-text");
 
 // ============ WebSocket 连接 ============
 function connect(name) {
-  ws = new WebSocket("ws://120.53.226.233:8080");
+  // 同源连接：http→ws，https→wss，/ws 由 Nginx 反代到 C++ server(127.0.0.1:9000)
+  const proto = location.protocol === "https:" ? "wss://" : "ws://";
+  ws = new WebSocket(proto + location.host + "/ws");
 
   ws.onopen = () => {
     ws.send(JSON.stringify({ type: "login", username: name }));

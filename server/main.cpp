@@ -37,7 +37,7 @@
 
 #include "websocket.h"
 
-constexpr int PORT        = 8080;
+constexpr int PORT        = 9000;   // 部署：Nginx 反代到 127.0.0.1:9000
 constexpr int MAX_EVENTS  = 64;
 constexpr int BUFFER_SIZE = 4096;
 
@@ -201,7 +201,7 @@ int main() {
 
     sockaddr_in address{};
     address.sin_family      = AF_INET;
-    address.sin_addr.s_addr = INADDR_ANY;
+    address.sin_addr.s_addr = inet_addr("127.0.0.1");   // 仅本机回环，由 Nginx 反向代理
     address.sin_port        = htons(PORT);
 
     if (bind(server_fd, (sockaddr*)&address, sizeof(address)) < 0) {

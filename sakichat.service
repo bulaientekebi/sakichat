@@ -1,0 +1,14 @@
+# sakichat systemd 服务（安装到 /etc/systemd/system/sakichat.service）
+[Unit]
+Description=sakichat C++ WebSocket chat server
+After=network.target
+
+[Service]
+ExecStart=/opt/sakichat/server/sakichat_server
+WorkingDirectory=/opt/sakichat/server
+Restart=always
+RestartSec=2
+User=ubuntu
+
+[Install]
+WantedBy=multi-user.target
