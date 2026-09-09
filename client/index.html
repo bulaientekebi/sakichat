@@ -39,6 +39,11 @@
   }
   #login-btn:hover { background: #5566d8; }
   #login-tip { margin-top: 12px; font-size: 13px; color: #e74c3c; min-height: 18px; }
+  .switch-link {
+    display: inline-block; margin-top: 10px;
+    font-size: 13px; color: #667eea; cursor: pointer;
+  }
+  .switch-link:hover { color: #5566d8; }
 
   /* ---------- 聊天主界面 ---------- */
   #chat-view {
@@ -129,8 +134,10 @@
 <div id="login-view">
   <h1>sakichat</h1>
   <p>简单聊天室 · WebSocket</p>
-  <input id="login-name" placeholder="输入你的昵称" maxlength="12">
-  <button id="login-btn">进入聊天室</button>
+  <input id="login-name" placeholder="用户名（2-20 位）" maxlength="20" autocomplete="username">
+  <input id="login-pass" type="password" placeholder="密码（6-64 位）" maxlength="64" autocomplete="current-password">
+  <button id="login-btn">登 录</button>
+  <a class="switch-link" id="switch-link">没有账号？立即注册</a>
   <div id="login-tip"></div>
 </div>
 
@@ -159,25 +166,29 @@ let ws = null;
 let myName = "";
 let target = "";     // 空 = 群聊；否则 = 私聊对象
 let onlineUsers = []; // 在线用户列表缓存
+let loginMode = "login"; // 当前表单模式："login" 登录 / "register" 注册
 
 // ============ DOM 引用 ============
 const loginView = document.getElementById("login-view");
 const chatView  = document.getElementById("chat-view");
-const loginName = document.getElementById("login-name");
-const loginTip  = document.getElementById("login-tip");
+const loginName  = document.getElementById("login-name");
+const loginPass  = document.getElementById("login-pass");
+const loginTip   = document.getElementById("login-tip");
+const loginBtn   = document.getElementById("login-btn");
+const switchLink = document.getElementById("switch-link");
 const userList  = document.getElementById("user-list");
 const msgList   = document.getElementById("msg-list");
 const chatHeader = document.getElementById("chat-header");
 const inputText = document.getElementById("input-text");
 
 // ============ WebSocket 连接 ============
-function connect(name) {
+function connect(name, password) {
   // 同源连接：http→ws，https→wss，/ws 由 Nginx 反代到 C++ server(127.0.0.1:9000)
   const proto = location.protocol === "https:" ? "wss://" : "ws://";
   ws = new WebSocket(proto + location.host + "/ws");
 
   ws.onopen = () => {
-    ws.send(JSON.stringify({ type: "login", username: name }));
+    ws.send(JSON.stringify({ type: loginMode, username: name, password: password }));
   };
 
   ws.onmessage = (e) => {
@@ -215,10 +226,18 @@ function renderUserList(users) {
   users.forEach((name) => {
     const div = document.createElement("div");
     div.className = "user-item" + (name === target ? " active" : "");
-    const first = (name || "?").charAt(0).toUpperCase();
-    div.innerHTML =
-      '<div class="avatar">' + first + "</div>" +
-      '<div class="user-name">' + name + "</div>";
+
+    // 全部用 textContent 写入，昵称含 HTML 也只按纯文本显示（防 XSS）
+    const avatar = document.createElement("div");
+    avatar.className = "avatar";
+    avatar.textContent = (name || "?").charAt(0).toUpperCase();
+
+    const nm = document.createElement("div");
+    nm.className = "user-name";
+    nm.textContent = name;
+
+    div.appendChild(avatar);
+    div.appendChild(nm);
     div.onclick = () => selectUser(name);
     userList.appendChild(div);
   });
@@ -233,7 +252,10 @@ function selectUser(name) {
 function addSystemMsg(text) {
   const div = document.createElement("div");
   div.className = "msg system";
-  div.innerHTML = '<div class="bubble">' + text + "</div>";
+  const bubble = document.createElement("div");
+  bubble.className = "bubble";
+  bubble.textContent = text;   // system 文本含用户昵称，必须按纯文本插入
+  div.appendChild(bubble);
   msgList.appendChild(div);
   scrollBottom();
 }
@@ -242,19 +264,20 @@ function addChatMsg(from, text) {
   const mine = from === myName;
   const div = document.createElement("div");
   div.className = "msg " + (mine ? "mine" : "other");
-  div.innerHTML =
-    '<div class="who">' + (mine ? "我" : from) + "</div>" +
-    '<div class="bubble">' + escapeHtml(text) + "</div>";
+  const who = document.createElement("div");
+  who.className = "who";
+  who.textContent = mine ? "我" : from;
+  const bubble = document.createElement("div");
+  bubble.className = "bubble";
+  bubble.textContent = text;
+  div.appendChild(who);
+  div.appendChild(bubble);
   msgList.appendChild(div);
   scrollBottom();
 }
 
 function scrollBottom() {
   msgList.scrollTop = msgList.scrollHeight;
-}
-
-function escapeHtml(s) {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 // ============ 发送消息 ============
@@ -265,15 +288,31 @@ function sendMsg() {
   inputText.value = "";
 }
 
-// ============ 事件绑定 ============
-document.getElementById("login-btn").onclick = () => {
-  const name = loginName.value.trim();
-  if (!name) { loginTip.textContent = "请输入昵称"; return; }
+// ============ 登录/注册 ============
+function setMode(mode) {
+  loginMode = mode;
+  loginBtn.textContent = mode === "login" ? "登 录" : "注 册";
+  switchLink.textContent = mode === "login" ? "没有账号？立即注册" : "已有账号？去登录";
   loginTip.textContent = "";
-  connect(name);
+}
+
+loginBtn.onclick = () => {
+  const name = loginName.value.trim();
+  const pwd  = loginPass.value;
+  if (!name) { loginTip.textContent = "请输入用户名"; return; }
+  if (pwd.length < 6) { loginTip.textContent = "密码至少 6 位"; return; }
+  if (loginMode === "register" &&
+      !/^[A-Za-z0-9_\u4e00-\u9fa5]{2,20}$/.test(name)) {
+    loginTip.textContent = "用户名限 2-20 位中文/字母/数字/下划线";
+    return;
+  }
+  loginTip.textContent = "";
+  connect(name, pwd);
 };
 
-loginName.onkeydown = (e) => { if (e.key === "Enter") document.getElementById("login-btn").click(); };
+switchLink.onclick = () => setMode(loginMode === "login" ? "register" : "login");
+loginName.onkeydown = (e) => { if (e.key === "Enter") loginBtn.click(); };
+loginPass.onkeydown = (e) => { if (e.key === "Enter") loginBtn.click(); };
 document.getElementById("send-btn").onclick = sendMsg;
 inputText.onkeydown = (e) => { if (e.key === "Enter") sendMsg(); };
 

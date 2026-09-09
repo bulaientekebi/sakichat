@@ -12,15 +12,18 @@
  *
  * 消息协议（JSON 文本）：
  *   客户端 → 服务端：
- *     {"type":"login","username":"tom"}
+ *     {"type":"register","username":"tom","password":"xxx"}
+ *     {"type":"login","username":"tom","password":"xxx"}
  *     {"type":"chat","to":"jerry","text":"你好"}     // to 为空 = 群聊
  *     {"type":"online_list"}
  *   服务端 → 客户端：
  *     {"type":"login_ok","username":"tom"}
- *     {"type":"error","msg":"用户名已在线"}
+ *     {"type":"error","msg":"用户名已被注册"}
  *     {"type":"chat","from":"tom","to":"jerry","text":"你好"}
  *     {"type":"system","text":"tom 加入了聊天室"}
  *     {"type":"online_list","users":["tom","jerry"]}
+ *
+ * 账号存储：SQLite（server/sakichat.db）+ PBKDF2 密码哈希，见 auth.h
  */
 
 #include <iostream>
@@ -36,6 +39,7 @@
 #include <fcntl.h>
 
 #include "websocket.h"
+#include "auth.h"
 
 constexpr int PORT        = 9000;   // 部署：Nginx 反代到 127.0.0.1:9000
 constexpr int MAX_EVENTS  = 64;
@@ -90,6 +94,18 @@ void refresh_online_lists() {
     }
 }
 
+// 登录成功后的统一收尾：登记内存会话 + 广播上线 + 刷新列表
+// （login 与 register 共用，注册成功后视为直接登录）
+void do_login(int fd, const std::string& name) {
+    fd_to_user[fd] = name;
+    user_to_fd[name] = fd;
+    std::cout << "[登录] " << name << " (fd=" << fd << ")" << std::endl;
+
+    send_to(fd, "{\"type\":\"login_ok\",\"username\":\"" + name + "\"}");
+    broadcast("{\"type\":\"system\",\"text\":\"" + name + " 加入了聊天室\"}", fd);
+    refresh_online_lists();
+}
+
 // ============================================================
 // 简化 JSON 取值（教学版，正式项目用 nlohmann/json）
 // json_get("{\"type\":\"chat\",\"to\":\"jerry\"}", "to") → "jerry"
@@ -121,24 +137,38 @@ std::string json_get(const std::string& json, const std::string& key) {
 void handle_message(int fd, const std::string& json) {
     std::string type = json_get(json, "type");
 
-    if (type == "login") {
+    if (type == "login" || type == "register") {
         std::string name = json_get(json, "username");
-        if (name.empty()) {
-            send_to(fd, "{\"type\":\"error\",\"msg\":\"用户名不能为空\"}");
-            return;
-        }
-        if (user_to_fd.count(name)) {
-            send_to(fd, "{\"type\":\"error\",\"msg\":\"用户名 \"" + name + "\" 已在线\"}");
-            return;
-        }
+        std::string pwd  = json_get(json, "password");
 
-        fd_to_user[fd] = name;
-        user_to_fd[name] = fd;
-        std::cout << "[登录] " << name << " (fd=" << fd << ")" << std::endl;
-
-        send_to(fd, "{\"type\":\"login_ok\",\"username\":\"" + name + "\"}");
-        broadcast("{\"type\":\"system\",\"text\":\"" + name + " 加入了聊天室\"}", fd);
-        refresh_online_lists();
+        if (type == "login") {
+            // 认证交给 auth.h（SQLite + PBKDF2）
+            if (auth::login(name, pwd) != auth::Result::Ok) {
+                // 对外统一说法：不区分「用户不存在 / 密码错误」，防用户名枚举
+                send_to(fd, "{\"type\":\"error\",\"msg\":\"用户名或密码错误\"}");
+                return;
+            }
+            if (user_to_fd.count(name)) {
+                send_to(fd, "{\"type\":\"error\",\"msg\":\"该账号已在线\"}");
+                return;
+            }
+            do_login(fd, name);
+        } else { // register：注册成功后直接自动登录
+            switch (auth::register_user(name, pwd)) {
+                case auth::Result::Ok:
+                    do_login(fd, name);
+                    break;
+                case auth::Result::UserExists:
+                    send_to(fd, "{\"type\":\"error\",\"msg\":\"用户名已被注册\"}");
+                    break;
+                case auth::Result::BadInput:
+                    send_to(fd, "{\"type\":\"error\",\"msg\":\"用户名 2-20 位（字母/数字/下划线/中文），密码 6-64 位\"}");
+                    break;
+                default: // DbError 等内部错误不向客户端暴露细节
+                    send_to(fd, "{\"type\":\"error\",\"msg\":\"服务器内部错误，请稍后再试\"}");
+                    break;
+            }
+        }
     }
     else if (type == "chat") {
         std::string from = fd_to_user.count(fd) ? fd_to_user[fd] : "未知";
@@ -215,6 +245,13 @@ int main() {
         return 1;
     }
     set_nonblocking(server_fd);
+
+    // ---- 1.5 初始化账号数据库（SQLite），失败则拒绝启动 ----
+    if (!auth::db_init("sakichat.db")) {
+        std::cerr << "账号数据库初始化失败，服务退出" << std::endl;
+        close(server_fd);
+        return 1;
+    }
 
     // ---- 2. 创建 epoll ----
     int epoll_fd = epoll_create1(0);
@@ -305,7 +342,8 @@ int main() {
                 }
             }
         }
-    }
+    }                    
+                
 
     close(server_fd);
     close(epoll_fd);
